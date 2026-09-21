@@ -1,0 +1,18 @@
+{
+  "vtctlds": [
+    {
+      "host": {
+        "fqdn": "vitess:33574",
+        "hostname": "vitess:33575"
+      }
+    }
+  ],
+  "vtgates": [
+    {
+      "host": {
+        "fqdn": "vitess:33574",
+        "hostname": "vitess:33575"
+      }
+    }
+  ]
+}

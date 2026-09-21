@@ -1,0 +1,107 @@
+name: vitess-replication
+
+# VTGate MySQL = :33577
+
+services:
+  vitess:
+    image: vitess/vttestserver:mysql84
+    platform: linux/amd64
+    container_name: vitess
+    restart: unless-stopped
+    ports:
+      - "33574:33574"
+      - "33575:33575"
+      - "33577:33577"
+    environment:
+      PORT: "33574"
+      KEYSPACES: app
+      NUM_SHARDS: "1"
+      MYSQL_BIND_HOST: "0.0.0.0"
+      VTCOMBO_BIND_HOST: "0.0.0.0"
+      MYSQL_MAX_CONNECTIONS: "50"
+    volumes:
+      - ./docker/vitess/run.sh:/vt/run-app.sh:ro
+      - vitess-data:/vt/vtdataroot
+    entrypoint: ["/bin/bash", "/vt/run-app.sh"]
+    command: ["8.4.6-Vitess"]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h127.0.0.1 -P33577"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 240s
+
+  # Optional UI — do not leave it open hammering Vitess (causes extra load / crash risk)
+  # Start with: docker compose --profile ui up -d
+  phpmyadmin:
+    profiles: ["ui"]
+    image: phpmyadmin:5
+    container_name: vitess-phpmyadmin
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    environment:
+      PMA_HOST: vitess
+      PMA_PORT: 33577
+      PMA_USER: root
+      PMA_PASSWORD: ""
+      PMA_PMADB: ""
+      UPLOAD_LIMIT: 16M
+    depends_on:
+      vitess:
+        condition: service_healthy
+
+  # VTAdmin is NOT inside vttestserver. Optional profile (extra amd64 image — needs RAM).
+  # Start: docker compose --profile vtadmin up -d
+  # UI:    http://localhost:14201
+  # API:   http://localhost:14200
+  vtadmin-api:
+    profiles: ["vtadmin"]
+    image: vitess/lite:v24.0.2
+    platform: linux/amd64
+    container_name: vtadmin-api
+    restart: unless-stopped
+    ports:
+      - "14200:14200"
+    volumes:
+      - ./docker/vitess/vtadmin/discovery.json:/vt/config/discovery.json:ro
+    command:
+      - vtadmin
+      - --addr=0.0.0.0:14200
+      - --http-origin=http://localhost:14201
+      - --no-rbac
+      - --cluster=id=local,name=local,discovery=staticfile,discovery-staticfile-path=/vt/config/discovery.json,tablet-fqdn-tmpl=http://{{ .Tablet.Hostname }}:{{ .Tablet.PortMap.vt }}
+    depends_on:
+      vitess:
+        condition: service_healthy
+
+  vtadmin-assets:
+    profiles: ["vtadmin"]
+    image: vitess/lite:v24.0.2
+    platform: linux/amd64
+    user: "0"
+    volumes:
+      - vtadmin-web:/out
+      - ./docker/vitess/vtadmin/copy-assets.sh:/copy-assets.sh:ro
+    entrypoint: ["/bin/bash", "/copy-assets.sh"]
+    restart: "no"
+
+  vtadmin-web:
+    profiles: ["vtadmin"]
+    image: nginx:alpine
+    container_name: vtadmin-web
+    restart: unless-stopped
+    ports:
+      - "14201:80"
+    volumes:
+      - vtadmin-web:/usr/share/nginx/html:ro
+      - ./docker/vitess/vtadmin/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      vtadmin-assets:
+        condition: service_completed_successfully
+      vtadmin-api:
+        condition: service_started
+
+volumes:
+  vitess-data:
+  vtadmin-web:
