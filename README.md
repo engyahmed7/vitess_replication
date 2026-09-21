@@ -1,59 +1,257 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Vitess Replication + Laravel
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+A Laravel application backed by [Vitess](https://vitess.io/) using the official [vttestserver Docker image](https://vitess.io/docs/24.0/get-started/vttestserver-docker-image/). The stack provides a single keyspace with **one primary** and **two replicas**, exposed to the app through VTGate’s MySQL protocol.
 
-## About Laravel
+---
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+## Architecture
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+```mermaid
+flowchart TB
+  subgraph Clients
+    LA[Laravel App]
+    CLI[MySQL Client]
+    PMA[phpMyAdmin]
+    VTA[VTAdmin UI]
+  end
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+  subgraph Docker["Docker Compose"]
+    subgraph Vitess["vttestserver (vtcombo)"]
+      VTG[VTGate<br/>MySQL :33577]
+      VTC[vtctld / gRPC :33575]
+      HTTP[Status UI :33574]
 
-## Learning Laravel
+      subgraph Tablets["Keyspace: app · Shard: 0"]
+        P[(PRIMARY)]
+        R1[(REPLICA)]
+        R2[(REPLICA)]
+      end
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+      VTG --> P
+      VTG --> R1
+      VTG --> R2
+    end
 
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+    API[vtadmin-api :14200]
+    WEB[vtadmin-web :14201]
+  end
 
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
-
-```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+  LA -->|PDO MySQL| VTG
+  CLI --> VTG
+  PMA --> VTG
+  VTA --> WEB --> API
+  API -->|discovery| VTC
+  API -->|discovery| VTG
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+### Request flow
 
-## Contributing
+```mermaid
+sequenceDiagram
+  participant App as Laravel
+  participant Gate as VTGate
+  participant Primary as PRIMARY tablet
+  participant Replica as REPLICA tablet
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+  App->>Gate: SQL (MySQL protocol :33577)
+  Note over Gate: Plan & route<br/>keyspace = app
 
-## Code of Conduct
+  alt Write / primary target
+    Gate->>Primary: Execute
+    Primary-->>Gate: Result
+  else Read @replica
+    Gate->>Replica: Execute
+    Replica-->>Gate: Result
+  end
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+  Gate-->>App: Result set
+```
 
-## Security Vulnerabilities
+### Topology
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+| Concept | Value |
+|---------|--------|
+| Keyspace (logical DB) | `app` |
+| Physical database | `vt_app_0` |
+| Shards | `1` (`0`) |
+| Tablets | 1 PRIMARY + 2 REPLICA |
+| Planner | Gen4 |
 
-## License
+---
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
-# vitess_replication
+## Ports
+
+| Port | Service | Purpose |
+|------|---------|---------|
+| `33577` | VTGate | MySQL protocol — Laravel & clients connect here |
+| `33575` | vtcombo gRPC | VTAdmin / vtctld API |
+| `33574` | Status UI | Cluster debug page |
+| `14201` | VTAdmin web | Optional admin UI |
+| `14200` | VTAdmin API | Optional admin API |
+| `8080` | phpMyAdmin | Optional SQL UI |
+
+---
+
+## Prerequisites
+
+- Docker & Docker Compose
+- PHP 8.2+ and Composer (for the Laravel app)
+
+---
+
+## Quick start
+
+### 1. Start Vitess
+
+```bash
+docker compose up -d
+docker compose ps
+```
+
+Wait until the `vitess` service is **healthy**, then open the status page:
+
+- http://localhost:33574/debug/status
+
+### 2. Configure Laravel
+
+Copy environment defaults and point the app at VTGate:
+
+```bash
+cp .env.example .env
+php artisan key:generate
+```
+
+Relevant `.env` values:
+
+```env
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=33577
+DB_DATABASE=app
+DB_USERNAME=root
+DB_PASSWORD=
+```
+
+### 3. Migrate & run
+
+```bash
+php artisan config:clear
+php artisan migrate
+php artisan serve
+```
+
+Connectivity check route:
+
+```text
+GET /vitess
+```
+
+---
+
+## Project layout
+
+```text
+.
+├── docker-compose.yml          # Vitess + optional UI profiles
+├── docker/vitess/
+│   ├── run.sh                  # vttestserver flags (replicas, keyspace, …)
+│   └── vtadmin/
+│       ├── discovery.json      # VTAdmin static discovery (vtctld + vtgate)
+│       ├── nginx.conf
+│       └── copy-assets.sh
+├── config/database.php         # MySQL defaults → VTGate :33577 / keyspace app
+├── routes/web.php              # Includes GET /vitess health query
+└── .env.example
+```
+
+---
+
+## Connecting to Vitess
+
+### MySQL CLI
+
+```bash
+docker exec -it vitess mysql --host=127.0.0.1 --port=33577 --user=root
+```
+
+```sql
+-- Target the primary (writes)
+USE app@primary;
+
+CREATE TABLE IF NOT EXISTS test (
+  id BIGINT PRIMARY KEY,
+  note VARCHAR(64)
+);
+
+INSERT INTO test VALUES (1, 'from primary');
+
+-- Target a replica (reads)
+USE app@replica;
+SELECT * FROM test;
+
+-- Physical schema on the shard
+SHOW TABLES FROM vt_app_0;
+```
+
+### How Laravel uses Vitess
+
+Laravel uses a normal MySQL PDO connection. There is no Vitess-specific PHP package.
+
+```mermaid
+flowchart LR
+  A[Eloquent / Query Builder] --> B[Laravel mysql connection]
+  B --> C[VTGate :33577]
+  C --> D[Tablets]
+```
+
+- **Host / port** — VTGate (`127.0.0.1:33577`)
+- **Database** — keyspace name `app`
+- Routing (primary vs replica) can be selected in SQL with `USE app@primary` / `USE app@replica` when using the CLI or raw sessions
+
+---
+
+## Optional UIs
+
+### phpMyAdmin
+
+```bash
+docker compose --profile ui up -d
+```
+
+Open http://localhost:8080 (host `vitess`, port `33577`).
+
+### VTAdmin
+
+```bash
+docker compose --profile vtadmin up -d
+```
+
+| Surface | URL |
+|---------|-----|
+| UI | http://localhost:14201 |
+| API | http://localhost:14200 |
+
+Discovery is configured in `docker/vitess/vtadmin/discovery.json` so VTAdmin can resolve vtctld and VTGate inside the Compose network.
+
+---
+
+## Useful commands
+
+```bash
+# Follow Vitess logs
+docker logs -f vitess
+
+# Stop everything (keep data volume)
+docker compose --profile ui --profile vtadmin down
+
+# Stop and remove data volume
+docker compose --profile ui --profile vtadmin down -v
+```
+
+---
+
+## References
+
+- [Vitess documentation](https://vitess.io/docs/)
+- [vttestserver Docker image](https://vitess.io/docs/24.0/get-started/vttestserver-docker-image/)
+- [VTAdmin cluster discovery](https://vitess.io/docs/24.0/reference/vtadmin/cluster_discovery/)
