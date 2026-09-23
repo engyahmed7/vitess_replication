@@ -47,7 +47,19 @@ return [
         'mysql' => [
             'driver' => 'mysql',
             'url' => env('DB_URL'),
-            'host' => env('DB_HOST', '127.0.0.1'),
+            'read' => [
+                'host' => [
+                    env('DB_HOST', '127.0.0.1'),
+                ],
+                'database' => env('DB_DATABASE', 'laravel').'@replica',
+            ],
+            'write' => [
+                'host' => [
+                    env('DB_HOST', '127.0.0.1'),
+                ],
+                'database' => env('DB_DATABASE', 'laravel').'@primary',
+            ],
+
             'port' => env('DB_PORT', '33577'),
             'database' => env('DB_DATABASE', 'app'),
             'username' => env('DB_USERNAME', 'root'),
